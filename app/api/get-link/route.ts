@@ -31,7 +31,7 @@ const DEFAULT_HEADERS = {
 const VALID_ID_REGEX = /^[A-Za-z0-9_-]{6,}$/;
 const API_TIMEOUT = 10000;
 const CACHE_TTL = 300000; // 5 minutes
-const cache = new Map<string, { expiry: number; link: string }>();
+const cache = new Map<string, { expiry: number; link: string; metadata?: TeraboxFile }>();
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -47,12 +47,27 @@ export async function GET(request: Request): Promise<Response> {
     const cached = cache.get(id);
     if (cached && cached.expiry > Date.now()) {
       if (format === 'json') {
-        return NextResponse.json({ downloadUrl: cached.link }, { status: 200 });
+        return NextResponse.json({
+          downloadUrl: cached.link,
+          fileName: cached.metadata?.filename,
+          fileSize: cached.metadata?.size,
+        }, { 
+          status: 200,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Range',
+          }
+        });
       }
+      
+      // For direct downloads, use a redirect instead of trying to proxy the file
       return NextResponse.redirect(cached.link, {
         status: 307,
         headers: {
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
         },
       });
     }
@@ -72,8 +87,12 @@ export async function GET(request: Request): Promise<Response> {
 
     console.log('get download - downloadLink', downloadLink);
 
-    // Update cache
-    cache.set(id, { expiry: Date.now() + CACHE_TTL, link: downloadLink });
+    // Update cache with file metadata for better responses
+    cache.set(id, { 
+      expiry: Date.now() + CACHE_TTL, 
+      link: downloadLink,
+      metadata: fileData
+    });
 
     // If JSON format requested, return a JSON response
     if (format === 'json') {
@@ -82,35 +101,97 @@ export async function GET(request: Request): Promise<Response> {
         fileName: fileData.filename,
         fileSize: fileData.size,
       };
-      return NextResponse.json(jsonResponse, { status: 200 });
+      return NextResponse.json(jsonResponse, { 
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
+        }
+      });
     }
 
-    // Otherwise, fetch the file binary and return a download response
-    const fileResponse = await fetch(downloadLink, {
-      headers: DEFAULT_HEADERS,
-      redirect: 'manual',
-    });
-    if (!fileResponse.ok || !fileResponse.body) {
-      throw new Error('Failed to retrieve download link');
+    // Handle OPTIONS request for CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
     }
 
-    const headers = new Headers({
-      'Content-Type':
-        fileResponse.headers.get('Content-Type') || 'application/octet-stream',
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(
-        fileData.filename
-      )}`,
+    // Check for range request
+    const rangeHeader = request.headers.get('range');
+    
+    // For large files, better to redirect than to proxy through our server
+    // This avoids memory issues with large files
+    if (fileData.size > 100 * 1024 * 1024) { // 100MB threshold
+      return NextResponse.redirect(downloadLink, {
+        status: 307,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
+        },
+      });
+    }
+
+    // For smaller files or when streaming, handle proxy with proper range support
+    const fetchOptions: RequestInit = {
+      headers: {
+        ...DEFAULT_HEADERS,
+      },
+      redirect: 'follow', // Allow redirects for the remote resource
+    };
+
+    // Add range header if present in the original request
+    if (rangeHeader) {
+      fetchOptions.headers = {
+        ...fetchOptions.headers,
+        'Range': rangeHeader,
+      };
+    }
+
+    // Fetch the file from the source with proper streaming
+    const fileResponse = await fetch(downloadLink, fetchOptions);
+    
+    if (!fileResponse.ok && fileResponse.status !== 206) {
+      throw new Error(`Failed to retrieve file: ${fileResponse.status} ${fileResponse.statusText}`);
+    }
+
+    // Prepare response headers
+    const responseHeaders = new Headers({
+      'Content-Type': fileResponse.headers.get('Content-Type') || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileData.filename)}`,
       'Accept-Ranges': 'bytes',
-      'Content-Length': fileData.size.toString(),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Range',
       'Cache-Control': 'public, max-age=3600',
       'X-File-Name': encodeURIComponent(fileData.filename),
       'X-File-Size': fileData.size.toString(),
       'X-File-Md5': fileData.md5,
     });
 
+    // Copy content length and range headers if present
+    if (fileResponse.headers.has('Content-Length')) {
+      responseHeaders.set('Content-Length', fileResponse.headers.get('Content-Length')!);
+    } else if (!rangeHeader) {
+      responseHeaders.set('Content-Length', fileData.size.toString());
+    }
+
+    if (fileResponse.headers.has('Content-Range')) {
+      responseHeaders.set('Content-Range', fileResponse.headers.get('Content-Range')!);
+    }
+
+    // Return the response with the remote file content
     return new Response(fileResponse.body, {
-      headers,
-      status: 200,
+      status: fileResponse.status,
+      headers: responseHeaders,
     });
   } catch (error: any) {
     console.error(`Error processing request: ${error.message}`);
@@ -119,6 +200,7 @@ export async function GET(request: Request): Promise<Response> {
       {
         status: 500,
         headers: {
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
           'Content-Type': 'application/json',
         },
