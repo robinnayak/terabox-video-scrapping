@@ -15,8 +15,8 @@ export default function Home() {
   const [inputUrl, setInputUrl] = useState<string>("");
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
-  const [downloadProgress, setDownloadProgress] = useState<number>(0);
 
   const extractSurlId = (url: string): string | null => {
     try {
@@ -47,7 +47,8 @@ export default function Home() {
 
       const apiUrl = `/api/get-link?id=${surlId}`;
       const headResponse = await axios.head(apiUrl);
-      
+
+      console.log("headResponse", headResponse);
       // Get metadata from custom headers
       const fileName = headResponse.headers["x-file-name"] || "video.mp4";
       const fileSize = parseInt(headResponse.headers["x-file-size"] || "0", 10);
@@ -67,40 +68,30 @@ export default function Home() {
     }
   };
 
-  const handleDownload = async () => {
+  const handleDownload = () => {
     if (!videoInfo?.surlId) return;
+    setIsDownloading(true);
 
     try {
-      const response = await fetch(`/api/get-link?id=${videoInfo.surlId}`);
-      const reader = response.body?.getReader();
-      
-      if (!reader) throw new Error("Failed to start download");
-      
-      const chunks: Uint8Array[] = [];
-      let receivedLength = 0;
+      const downloadUrl = `/api/get-link?id=${videoInfo.surlId}`;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        chunks.push(value);
-        receivedLength += value.length;
-        setDownloadProgress((receivedLength / videoInfo.fileSize) * 100);
-      }
-
-      const blob = new Blob(chunks, { type: "video/mp4" });
-      const downloadUrl = window.URL.createObjectURL(blob);
+      console.log("Download URL", downloadUrl);
       const a = document.createElement("a");
       a.href = downloadUrl;
       a.download = videoInfo.fileName;
+      a.style.display = "none";
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(downloadUrl);
-      document.body.removeChild(a);
 
+      // Remove the anchor element after a short delay
+      setTimeout(() => {
+        document.body.removeChild(a);
+        setIsDownloading(false);
+      }, 5000); // Adjust delay as needed
     } catch (err) {
       const error = err as Error;
       setError(`Download failed: ${error.message}`);
+      setIsDownloading(false);
     }
   };
 
@@ -120,7 +111,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-100 to-gray-200 p-4">
       <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-xl p-8 transition-all duration-300 hover:shadow-2xl">
-        <h1 className="text-4xl font-bold text-gray-800 mb-8 text-center bg-gradient-to-r from-blue-600 to-green-500 bg-clip-text text-transparent">
+        <h1 className="text-4xl font-bold mb-8 text-center bg-gradient-to-r from-blue-600 to-green-500 bg-clip-text text-transparent">
           Terabox Video Downloader
         </h1>
 
@@ -141,8 +132,20 @@ export default function Home() {
             {loading ? (
               <span className="flex items-center">
                 <svg className="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  />
                 </svg>
                 Loading...
               </span>
@@ -165,7 +168,10 @@ export default function Home() {
                 📹 {videoInfo.fileName}
               </h2>
               <p className="text-lg text-gray-600">
-                📦 Size: <span className="font-medium">{formatFileSize(videoInfo.fileSize)}</span>
+                📦 Size:{" "}
+                <span className="font-medium">
+                  {formatFileSize(videoInfo.fileSize)}
+                </span>
               </p>
             </div>
 
@@ -175,39 +181,57 @@ export default function Home() {
                 controls
                 width="100%"
                 height="100%"
+                playing={false}
                 config={{
                   file: {
                     attributes: {
                       controlsList: "nodownload",
                       crossOrigin: "anonymous",
+                      preload: "metadata",
+                      playsInline: true,
                     },
+                    forceVideo: true,
                   },
                 }}
+                onReady={() => console.log("Player ready")}
+                onError={(e) => setError(`Video playback failed: ${e}`)}
+                progressInterval={1000}
+                style={{
+                  backgroundColor: "#000",
+                  overflow: "hidden",
+                }}
+                fallback={
+                  <div className="text-white p-4">Loading player...</div>
+                }
               />
             </div>
 
             <div className="space-y-6">
-              {downloadProgress > 0 && (
-                <div className="space-y-4 animate-slide-up">
-                  <div className="w-full bg-gray-200 rounded-full h-4 shadow-inner">
-                    <div
-                      className="bg-gradient-to-r from-green-400 to-blue-500 h-4 rounded-full transition-all duration-500 ease-out"
-                      style={{ width: `${downloadProgress}%` }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-lg font-medium text-gray-600">
-                    <span>⬇️ {formatFileSize((videoInfo.fileSize * downloadProgress) / 100)}</span>
-                    <span>🎯 {formatFileSize(videoInfo.fileSize)}</span>
-                  </div>
-                </div>
-              )}
-
               <button
                 onClick={handleDownload}
-                className="w-full py-4 px-8 bg-gradient-to-r from-green-500 to-blue-600 text-white text-lg font-semibold rounded-xl hover:from-green-600 hover:to-blue-700 transition-all transform hover:scale-105 shadow-md"
+                disabled={isDownloading}
+                className="w-full py-4 px-8 bg-gradient-to-r from-green-500 to-blue-600 text-white text-lg font-semibold rounded-xl hover:from-green-600 hover:to-blue-700 transition-all"
               >
-                {downloadProgress > 0 ? (
-                  `🚀 Downloading (${downloadProgress.toFixed(1)}%)`
+                {isDownloading ? (
+                  <span className="flex items-center justify-center">
+                    <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                        fill="none"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      />
+                    </svg>
+                    Starting Download...
+                  </span>
                 ) : (
                   "💾 Download Original Video"
                 )}
