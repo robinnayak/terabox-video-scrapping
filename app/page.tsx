@@ -1,6 +1,8 @@
 "use client";
-import { useState, FormEvent } from "react";
+import { useState, FormEvent, useEffect, useRef } from "react";
 import axios from "axios";
+import VideoPlayer from "@/components/VideoPlayer";
+import { formatFileSize } from "@/utils/formatfiles";
 
 declare global {
   interface Window {
@@ -19,6 +21,17 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [downloadStarted, setDownloadStarted] = useState<boolean>(false);
+  // const [showPlayer, setShowPlayer] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Clear download progress when not actively downloading
+  useEffect(() => {
+    if (!downloadStarted && downloadProgress !== null) {
+      setDownloadProgress(null);
+    }
+  }, [downloadStarted, downloadProgress]);
 
   const extractSurlId = (url: string): string | null => {
     try {
@@ -37,6 +50,9 @@ export default function Home() {
     e.preventDefault();
     setLoading(true);
     setError("");
+    setDownloadProgress(null);
+    setDownloadStarted(false);
+    // setShowPlayer(false);
 
     try {
       const surlId = extractSurlId(inputUrl);
@@ -46,7 +62,6 @@ export default function Home() {
       const response = await axios.get<VideoInfo>(
         `/api/get-link?id=${surlId}&format=json`
       );
-      console.log("API Response Starting:");
       console.log("API Response:", response.data);
 
       if (!response.data.downloadUrl) {
@@ -67,42 +82,120 @@ export default function Home() {
     }
   };
 
+  // Direct download approach - best for smaller files
   const triggerDownload = () => {
     if (!videoInfo) return;
+
+    setDownloadStarted(true);
+    window.gtag?.("event", "download_start", {
+      file_name: videoInfo.fileName,
+      file_size: videoInfo.fileSize,
+    });
 
     const link = document.createElement("a");
     link.href = videoInfo.downloadUrl;
     link.download = videoInfo.fileName;
     link.rel = "noopener noreferrer";
     link.target = "_blank";
-
-    // Event listeners for better tracking
-    link.addEventListener("click", () => {
-      console.log("Download initiated:", videoInfo.fileName);
-      window.gtag?.("event", "download_start", {
-        file_name: videoInfo.fileName,
-        file_size: videoInfo.fileSize,
-      });
-    });
-
-    link.addEventListener("error", (e) => {
-      console.error("Download error:", e);
-      setError("Failed to start download. Please try again.");
-    });
-
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+
+    setTimeout(() => {
+      setDownloadStarted(false);
+    }, 3000);
   };
 
-  const formatFileSize = (bytes: number): string => {
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    if (bytes === 0) return "0 B";
+  // Advanced download with progress tracking - for larger files
+  const downloadWithProgress = async () => {
+    if (!videoInfo) return;
 
-    const exponent = Math.floor(Math.log(bytes) / Math.log(1024));
-    const size = bytes / Math.pow(1024, exponent);
-    return `${size.toFixed(2)} ${units[exponent]}`;
+    setDownloadStarted(true);
+    setDownloadProgress(0);
+
+    try {
+      window.gtag?.("event", "download_start", {
+        file_name: videoInfo.fileName,
+        file_size: videoInfo.fileSize,
+        method: "stream",
+      });
+
+      // For very large files, direct the user to the URL instead of downloading through the app
+      if (videoInfo.fileSize > 1024 * 1024 * 1024) {
+        // 1GB
+        window.open(videoInfo.downloadUrl, "_blank");
+        setDownloadProgress(100);
+        setTimeout(() => {
+          setDownloadStarted(false);
+        }, 3000);
+        return;
+      }
+
+      // For medium-large files, use streaming download with progress
+      const response = await axios({
+        url: videoInfo.downloadUrl,
+        method: "GET",
+        responseType: "blob",
+        onDownloadProgress: (progressEvent) => {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) /
+              (progressEvent.total || videoInfo.fileSize)
+          );
+          setDownloadProgress(percentCompleted);
+        },
+        // Important for CORS
+        withCredentials: false,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+
+      // Create download from blob
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", videoInfo.fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      window.gtag?.("event", "download_complete", {
+        file_name: videoInfo.fileName,
+        file_size: videoInfo.fileSize,
+      });
+    } catch (err) {
+      console.error("Download error:", err);
+      setError("Download failed. Trying direct download instead...");
+
+      // Fallback to direct download
+      setTimeout(() => {
+        triggerDownload();
+      }, 1000);
+    } finally {
+      setTimeout(() => {
+        setDownloadStarted(false);
+      }, 3000);
+    }
   };
+
+
+
+  // Handle video player errors
+  const handleVideoError = () => {
+    setError(
+      "Unable to preview this video. The video may be protected or in an unsupported format."
+    );
+    // setShowPlayer(false);
+  };
+
+  // Determine if file is large (>100MB)
+  const isLargeFile = videoInfo && videoInfo.fileSize > 100 * 1024 * 1024;
+
+  // Check if the file is a video based on extension
+  const isVideo = videoInfo?.fileName.match(
+    /\.(mp4|webm|mkv|avi|mov|wmv|flv|m4v|3gp)$/i
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-100 to-gray-200 p-4">
@@ -152,12 +245,16 @@ export default function Home() {
             )}
           </button>
         </form>
-
         {error && (
           <div className="mb-6 p-4 bg-red-100 text-red-700 rounded-lg border border-red-200 animate-pulse">
             ⚠️ {error}
           </div>
         )}
+
+        {videoInfo && (
+          <VideoPlayer videoInfo={videoInfo} isLargeFile={isLargeFile} videoRef={videoRef} handleVideoError={handleVideoError} isVideo={isVideo} />
+        )}
+
 
         {videoInfo && (
           <div className="space-y-8 animate-fade-in">
@@ -170,21 +267,57 @@ export default function Home() {
                 <span className="font-medium">
                   {formatFileSize(videoInfo.fileSize)}
                 </span>
+                {isLargeFile && (
+                  <span className="ml-2 text-amber-600 font-medium">
+                    (Large File)
+                  </span>
+                )}
               </p>
             </div>
-
             <div className="space-y-6">
-              <button
-                onClick={triggerDownload}
-                className="w-full py-4 px-8 bg-gradient-to-r from-green-500 to-blue-600 text-white text-lg font-semibold rounded-xl hover:from-green-600 hover:to-blue-700 transition-all"
-              >
-                💾 Download Original Video
-              </button>
+              {downloadProgress !== null && (
+                <div className="w-full bg-gray-200 rounded-full h-4 mb-4">
+                  <div
+                    className="bg-green-600 h-4 rounded-full transition-all duration-300"
+                    style={{ width: `${downloadProgress}%` }}
+                  ></div>
+                  <p className="text-sm text-gray-600 mt-1 text-center">
+                    {downloadProgress}% complete
+                  </p>
+                </div>
+              )}
+
+              {isLargeFile ? (
+                <div className="flex flex-col space-y-4">
+                  <button
+                    onClick={downloadWithProgress}
+                    disabled={downloadStarted}
+                    className="w-full py-4 px-8 bg-gradient-to-r from-blue-500 to-blue-700 text-white text-lg font-semibold rounded-xl hover:from-blue-600 hover:to-blue-800 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    💾 Stream Download (Recommended)
+                  </button>
+                  <button
+                    onClick={triggerDownload}
+                    disabled={downloadStarted}
+                    className="w-full py-4 px-8 bg-gradient-to-r from-green-500 to-blue-600 text-white text-lg font-semibold rounded-xl hover:from-green-600 hover:to-blue-700 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    🔗 Direct Download
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={triggerDownload}
+                  disabled={downloadStarted}
+                  className="w-full py-4 px-8 bg-gradient-to-r from-green-500 to-blue-600 text-white text-lg font-semibold rounded-xl hover:from-green-600 hover:to-blue-700 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                >
+                  💾 Download File
+                </button>
+              )}
 
               <p className="text-sm text-gray-500 text-center">
-                Note: Downloads are handled directly by your browser.
-                If the download doesn&apos;t start automatically, check your pop-up
-                settings.
+                {isLargeFile
+                  ? "For large files, the stream download option provides progress tracking and better stability."
+                  : "Downloads are handled directly by your browser. If the download doesn't start automatically, check your pop-up settings."}
               </p>
             </div>
           </div>

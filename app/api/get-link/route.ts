@@ -31,33 +31,46 @@ const DEFAULT_HEADERS = {
 const VALID_ID_REGEX = /^[A-Za-z0-9_-]{6,}$/;
 const API_TIMEOUT = 10000;
 const CACHE_TTL = 300000; // 5 minutes
-const cache = new Map<string, { expiry: number; link: string }>();
+const cache = new Map<string, { expiry: number; link: string; metadata?: TeraboxFile }>();
 
 export async function GET(request: Request): Promise<Response> {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
-    const format = searchParams.get('format'); // if "json", return JSON response
+    const format = searchParams.get('format');
 
     if (!id || !VALID_ID_REGEX.test(id)) {
       return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
     }
 
-    // Check cache and ensure it hasn't expired
+    // Cache check and response (unchanged)
     const cached = cache.get(id);
     if (cached && cached.expiry > Date.now()) {
       if (format === 'json') {
-        return NextResponse.json({ downloadUrl: cached.link }, { status: 200 });
+        return NextResponse.json({
+          downloadUrl: cached.link,
+          fileName: cached.metadata?.filename,
+          fileSize: cached.metadata?.size,
+        }, { 
+          status: 200,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Range',
+          }
+        });
       }
       return NextResponse.redirect(cached.link, {
         status: 307,
         headers: {
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
         },
       });
     }
 
-    // Fetch metadata from upstream
+    // Fetch metadata
     const metadata = await fetchWithTimeout<TeraboxMetadata>(
       `https://terabox.hnn.workers.dev/api/get-info?shorturl=${id}&pwd=`,
       { headers: DEFAULT_HEADERS }
@@ -70,55 +83,99 @@ export async function GET(request: Request): Promise<Response> {
     const fileData = metadata.list[0];
     const downloadLink = await getDownloadLink(metadata, fileData);
 
-    console.log('get download - downloadLink', downloadLink);
-
     // Update cache
-    cache.set(id, { expiry: Date.now() + CACHE_TTL, link: downloadLink });
+    cache.set(id, { 
+      expiry: Date.now() + CACHE_TTL, 
+      link: downloadLink,
+      metadata: fileData
+    });
 
-    // If JSON format requested, return a JSON response
+    // Handle JSON response
     if (format === 'json') {
-      const jsonResponse = {
+      return NextResponse.json({
         downloadUrl: downloadLink,
         fileName: fileData.filename,
         fileSize: fileData.size,
-      };
-      return NextResponse.json(jsonResponse, { status: 200 });
+      }, { 
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
+        }
+      });
     }
 
-    // Otherwise, fetch the file binary and return a download response
-    const fileResponse = await fetch(downloadLink, {
-      headers: DEFAULT_HEADERS,
-      redirect: 'manual',
-    });
-    if (!fileResponse.ok || !fileResponse.body) {
-      throw new Error('Failed to retrieve download link');
+    // Handle OPTIONS request
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
     }
 
-    const headers = new Headers({
-      'Content-Type':
-        fileResponse.headers.get('Content-Type') || 'application/octet-stream',
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(
-        fileData.filename
-      )}`,
+    // Main fix: Removed redirect logic for large files
+    const rangeHeader = request.headers.get('range');
+    
+    // Configure fetch with proper headers
+    const fetchOptions: RequestInit = {
+      headers: {
+        ...DEFAULT_HEADERS,
+        Cookie: request.headers.get('Cookie') || '',
+        Range: rangeHeader || '',
+      },
+      redirect: 'follow',
+    };
+
+    // Stream the file directly
+    const fileResponse = await fetch(downloadLink, fetchOptions);
+    
+    if (!fileResponse.ok && fileResponse.status !== 206) {
+      throw new Error(`Failed to retrieve file: ${fileResponse.status} ${fileResponse.statusText}`);
+    }
+
+    // Prepare response headers
+    const responseHeaders = new Headers({
+      'Content-Type': fileResponse.headers.get('Content-Type') || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileData.filename)}`,
       'Accept-Ranges': 'bytes',
-      'Content-Length': fileData.size.toString(),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Range',
       'Cache-Control': 'public, max-age=3600',
       'X-File-Name': encodeURIComponent(fileData.filename),
       'X-File-Size': fileData.size.toString(),
       'X-File-Md5': fileData.md5,
     });
 
-    return new Response(fileResponse.body, {
-      headers,
-      status: 200,
+    // Add content headers
+    fileResponse.headers.forEach((value, key) => {
+      if (['content-length', 'content-range'].includes(key.toLowerCase())) {
+        responseHeaders.set(key, value);
+      }
     });
-  } catch (error: any) {
-    console.error(`Error processing request: ${error.message}`);
+
+    return new Response(fileResponse.body, {
+      status: fileResponse.status,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`Error processing request: ${error.message}`);
+    } else {
+      console.error('Error processing request:', error);
+    }
     return NextResponse.json(
-      { error: error.message || 'Server error' },
+      { error: (error instanceof Error ? error.message : 'Server error') },
       {
         status: 500,
         headers: {
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
           'Content-Type': 'application/json',
         },
@@ -127,6 +184,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 }
 
+// Remaining helper functions unchanged
 async function getDownloadLink(
   metadata: TeraboxMetadata,
   fileData: TeraboxFile
@@ -151,7 +209,6 @@ async function getDownloadLink(
   if (!response.downloadLink) {
     throw new Error('No download link received from upstream');
   }
-  console.log('response - downloadLink', response.downloadLink);
   return response.downloadLink;
 }
 
