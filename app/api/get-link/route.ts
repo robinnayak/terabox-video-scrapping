@@ -37,13 +37,13 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
-    const format = searchParams.get('format'); // if "json", return JSON response
+    const format = searchParams.get('format');
 
     if (!id || !VALID_ID_REGEX.test(id)) {
       return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
     }
 
-    // Check cache and ensure it hasn't expired
+    // Cache check and response (unchanged)
     const cached = cache.get(id);
     if (cached && cached.expiry > Date.now()) {
       if (format === 'json') {
@@ -60,8 +60,6 @@ export async function GET(request: Request): Promise<Response> {
           }
         });
       }
-      
-      // For direct downloads, use a redirect instead of trying to proxy the file
       return NextResponse.redirect(cached.link, {
         status: 307,
         headers: {
@@ -72,7 +70,7 @@ export async function GET(request: Request): Promise<Response> {
       });
     }
 
-    // Fetch metadata from upstream
+    // Fetch metadata
     const metadata = await fetchWithTimeout<TeraboxMetadata>(
       `https://terabox.hnn.workers.dev/api/get-info?shorturl=${id}&pwd=`,
       { headers: DEFAULT_HEADERS }
@@ -85,23 +83,20 @@ export async function GET(request: Request): Promise<Response> {
     const fileData = metadata.list[0];
     const downloadLink = await getDownloadLink(metadata, fileData);
 
-    console.log('get download - downloadLink', downloadLink);
-
-    // Update cache with file metadata for better responses
+    // Update cache
     cache.set(id, { 
       expiry: Date.now() + CACHE_TTL, 
       link: downloadLink,
       metadata: fileData
     });
 
-    // If JSON format requested, return a JSON response
+    // Handle JSON response
     if (format === 'json') {
-      const jsonResponse = {
+      return NextResponse.json({
         downloadUrl: downloadLink,
         fileName: fileData.filename,
         fileSize: fileData.size,
-      };
-      return NextResponse.json(jsonResponse, { 
+      }, { 
         status: 200,
         headers: {
           'Access-Control-Allow-Origin': '*',
@@ -111,7 +106,7 @@ export async function GET(request: Request): Promise<Response> {
       });
     }
 
-    // Handle OPTIONS request for CORS preflight
+    // Handle OPTIONS request
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
@@ -124,39 +119,20 @@ export async function GET(request: Request): Promise<Response> {
       });
     }
 
-    // Check for range request
+    // Main fix: Removed redirect logic for large files
     const rangeHeader = request.headers.get('range');
     
-    // For large files, better to redirect than to proxy through our server
-    // This avoids memory issues with large files
-    if (fileData.size > 100 * 1024 * 1024) { // 100MB threshold
-      return NextResponse.redirect(downloadLink, {
-        status: 307,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Range',
-        },
-      });
-    }
-
-    // For smaller files or when streaming, handle proxy with proper range support
+    // Configure fetch with proper headers
     const fetchOptions: RequestInit = {
       headers: {
         ...DEFAULT_HEADERS,
+        Cookie: request.headers.get('Cookie') || '',
+        Range: rangeHeader || '',
       },
-      redirect: 'follow', // Allow redirects for the remote resource
+      redirect: 'follow',
     };
 
-    // Add range header if present in the original request
-    if (rangeHeader) {
-      fetchOptions.headers = {
-        ...fetchOptions.headers,
-        'Range': rangeHeader,
-      };
-    }
-
-    // Fetch the file from the source with proper streaming
+    // Stream the file directly
     const fileResponse = await fetch(downloadLink, fetchOptions);
     
     if (!fileResponse.ok && fileResponse.status !== 206) {
@@ -177,26 +153,25 @@ export async function GET(request: Request): Promise<Response> {
       'X-File-Md5': fileData.md5,
     });
 
-    // Copy content length and range headers if present
-    if (fileResponse.headers.has('Content-Length')) {
-      responseHeaders.set('Content-Length', fileResponse.headers.get('Content-Length')!);
-    } else if (!rangeHeader) {
-      responseHeaders.set('Content-Length', fileData.size.toString());
-    }
+    // Add content headers
+    fileResponse.headers.forEach((value, key) => {
+      if (['content-length', 'content-range'].includes(key.toLowerCase())) {
+        responseHeaders.set(key, value);
+      }
+    });
 
-    if (fileResponse.headers.has('Content-Range')) {
-      responseHeaders.set('Content-Range', fileResponse.headers.get('Content-Range')!);
-    }
-
-    // Return the response with the remote file content
     return new Response(fileResponse.body, {
       status: fileResponse.status,
       headers: responseHeaders,
     });
-  } catch (error: any) {
-    console.error(`Error processing request: ${error.message}`);
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`Error processing request: ${error.message}`);
+    } else {
+      console.error('Error processing request:', error);
+    }
     return NextResponse.json(
-      { error: error.message || 'Server error' },
+      { error: (error instanceof Error ? error.message : 'Server error') },
       {
         status: 500,
         headers: {
@@ -209,6 +184,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 }
 
+// Remaining helper functions unchanged
 async function getDownloadLink(
   metadata: TeraboxMetadata,
   fileData: TeraboxFile
@@ -233,7 +209,6 @@ async function getDownloadLink(
   if (!response.downloadLink) {
     throw new Error('No download link received from upstream');
   }
-  console.log('response - downloadLink', response.downloadLink);
   return response.downloadLink;
 }
 

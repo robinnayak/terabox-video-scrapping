@@ -1,6 +1,8 @@
 "use client";
-import { useState, FormEvent, useEffect } from "react";
+import { useState, FormEvent, useEffect, useRef } from "react";
 import axios from "axios";
+import VideoPlayer from "@/components/VideoPlayer";
+import { formatFileSize } from "@/utils/formatfiles";
 
 declare global {
   interface Window {
@@ -21,6 +23,8 @@ export default function Home() {
   const [error, setError] = useState<string>("");
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [downloadStarted, setDownloadStarted] = useState<boolean>(false);
+  // const [showPlayer, setShowPlayer] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   // Clear download progress when not actively downloading
   useEffect(() => {
@@ -48,6 +52,7 @@ export default function Home() {
     setError("");
     setDownloadProgress(null);
     setDownloadStarted(false);
+    // setShowPlayer(false);
 
     try {
       const surlId = extractSurlId(inputUrl);
@@ -95,7 +100,7 @@ export default function Home() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
+
     setTimeout(() => {
       setDownloadStarted(false);
     }, 3000);
@@ -104,10 +109,10 @@ export default function Home() {
   // Advanced download with progress tracking - for larger files
   const downloadWithProgress = async () => {
     if (!videoInfo) return;
-    
+
     setDownloadStarted(true);
     setDownloadProgress(0);
-    
+
     try {
       window.gtag?.("event", "download_start", {
         file_name: videoInfo.fileName,
@@ -116,43 +121,45 @@ export default function Home() {
       });
 
       // For very large files, direct the user to the URL instead of downloading through the app
-      if (videoInfo.fileSize > 1024 * 1024 * 1024) { // 1GB
-        window.open(videoInfo.downloadUrl, '_blank');
+      if (videoInfo.fileSize > 1024 * 1024 * 1024) {
+        // 1GB
+        window.open(videoInfo.downloadUrl, "_blank");
         setDownloadProgress(100);
         setTimeout(() => {
           setDownloadStarted(false);
         }, 3000);
         return;
       }
-      
+
       // For medium-large files, use streaming download with progress
       const response = await axios({
         url: videoInfo.downloadUrl,
-        method: 'GET',
-        responseType: 'blob',
+        method: "GET",
+        responseType: "blob",
         onDownloadProgress: (progressEvent) => {
           const percentCompleted = Math.round(
-            (progressEvent.loaded * 100) / (progressEvent.total || videoInfo.fileSize)
+            (progressEvent.loaded * 100) /
+              (progressEvent.total || videoInfo.fileSize)
           );
           setDownloadProgress(percentCompleted);
         },
         // Important for CORS
         withCredentials: false,
         headers: {
-          'Access-Control-Allow-Origin': '*',
-        }
+          "Access-Control-Allow-Origin": "*",
+        },
       });
 
       // Create download from blob
       const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
+      const link = document.createElement("a");
       link.href = url;
-      link.setAttribute('download', videoInfo.fileName);
+      link.setAttribute("download", videoInfo.fileName);
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
-      
+
       window.gtag?.("event", "download_complete", {
         file_name: videoInfo.fileName,
         file_size: videoInfo.fileSize,
@@ -160,7 +167,7 @@ export default function Home() {
     } catch (err) {
       console.error("Download error:", err);
       setError("Download failed. Trying direct download instead...");
-      
+
       // Fallback to direct download
       setTimeout(() => {
         triggerDownload();
@@ -172,17 +179,23 @@ export default function Home() {
     }
   };
 
-  const formatFileSize = (bytes: number): string => {
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    if (bytes === 0) return "0 B";
 
-    const exponent = Math.floor(Math.log(bytes) / Math.log(1024));
-    const size = bytes / Math.pow(1024, exponent);
-    return `${size.toFixed(2)} ${units[exponent]}`;
+
+  // Handle video player errors
+  const handleVideoError = () => {
+    setError(
+      "Unable to preview this video. The video may be protected or in an unsupported format."
+    );
+    // setShowPlayer(false);
   };
 
   // Determine if file is large (>100MB)
   const isLargeFile = videoInfo && videoInfo.fileSize > 100 * 1024 * 1024;
+
+  // Check if the file is a video based on extension
+  const isVideo = videoInfo?.fileName.match(
+    /\.(mp4|webm|mkv|avi|mov|wmv|flv|m4v|3gp)$/i
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-100 to-gray-200 p-4">
@@ -232,12 +245,16 @@ export default function Home() {
             )}
           </button>
         </form>
-
         {error && (
           <div className="mb-6 p-4 bg-red-100 text-red-700 rounded-lg border border-red-200 animate-pulse">
             ⚠️ {error}
           </div>
         )}
+
+        {videoInfo && (
+          <VideoPlayer videoInfo={videoInfo} isLargeFile={isLargeFile} videoRef={videoRef} handleVideoError={handleVideoError} isVideo={isVideo} />
+        )}
+
 
         {videoInfo && (
           <div className="space-y-8 animate-fade-in">
@@ -257,12 +274,11 @@ export default function Home() {
                 )}
               </p>
             </div>
-
             <div className="space-y-6">
               {downloadProgress !== null && (
                 <div className="w-full bg-gray-200 rounded-full h-4 mb-4">
-                  <div 
-                    className="bg-green-600 h-4 rounded-full transition-all duration-300" 
+                  <div
+                    className="bg-green-600 h-4 rounded-full transition-all duration-300"
                     style={{ width: `${downloadProgress}%` }}
                   ></div>
                   <p className="text-sm text-gray-600 mt-1 text-center">
@@ -299,10 +315,9 @@ export default function Home() {
               )}
 
               <p className="text-sm text-gray-500 text-center">
-                {isLargeFile 
-                  ? "For large files, the stream download option provides progress tracking and better stability." 
-                  : "Downloads are handled directly by your browser. If the download doesn't start automatically, check your pop-up settings."
-                }
+                {isLargeFile
+                  ? "For large files, the stream download option provides progress tracking and better stability."
+                  : "Downloads are handled directly by your browser. If the download doesn't start automatically, check your pop-up settings."}
               </p>
             </div>
           </div>
