@@ -204,6 +204,13 @@ export default function Home() {
           Terabox Video Downloader
         </h1>
 
+        <a
+          href="download"
+          className="block text-center mt-8 mb-4 text-blue-500 hover:text-blue-700 transition-all duration-300"
+        >
+          redirects to Download page
+        </a>
+
         <form onSubmit={handleSubmit} className="flex gap-4 mb-8">
           <input
             type="url"
@@ -252,9 +259,14 @@ export default function Home() {
         )}
 
         {videoInfo && (
-          <VideoPlayer videoInfo={videoInfo} isLargeFile={isLargeFile} videoRef={videoRef} handleVideoError={handleVideoError} isVideo={isVideo} />
+          <VideoPlayer
+            videoInfo={videoInfo}
+            isLargeFile={isLargeFile}
+            videoRef={videoRef}
+            handleVideoError={handleVideoError}
+            isVideo={isVideo}
+          />
         )}
-
 
         {videoInfo && (
           <div className="space-y-8 animate-fade-in">

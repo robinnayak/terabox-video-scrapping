@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-export const runtime = 'edge';
+// export const runtime = 'edge';
 
 interface TeraboxFile {
   fs_id: string;
@@ -25,13 +25,30 @@ interface TeraboxDownloadData {
 const DEFAULT_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  Referer: 'https://terabox.hnn.workers.dev/',
+  'Referer': 'https://www.terabox.com/',
+  'Origin': 'https://www.terabox.com',
+  'Cookie': `ndut_fm=${Date.now()}`,
 };
 
 const VALID_ID_REGEX = /^[A-Za-z0-9_-]{6,}$/;
 const API_TIMEOUT = 10000;
 const CACHE_TTL = 300000; // 5 minutes
 const cache = new Map<string, { expiry: number; link: string; metadata?: TeraboxFile }>();
+
+// List of client headers to forward
+const CLIENT_HEADERS_TO_FORWARD = [
+  'cookie',
+  'range',
+  'if-range',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'x-requested-with',
+  'accept-encoding',
+  'sec-ch-ua-platform'
+];
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -43,7 +60,7 @@ export async function GET(request: Request): Promise<Response> {
       return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
     }
 
-    // Cache check and response (unchanged)
+    // Check cache first
     const cached = cache.get(id);
     if (cached && cached.expiry > Date.now()) {
       if (format === 'json') {
@@ -51,7 +68,7 @@ export async function GET(request: Request): Promise<Response> {
           downloadUrl: cached.link,
           fileName: cached.metadata?.filename,
           fileSize: cached.metadata?.size,
-        }, { 
+        }, {
           status: 200,
           headers: {
             'Access-Control-Allow-Origin': '*',
@@ -76,27 +93,28 @@ export async function GET(request: Request): Promise<Response> {
       { headers: DEFAULT_HEADERS }
     );
 
+    console.log("metadata", metadata);
     if (!metadata?.list?.[0]?.fs_id) {
       throw new Error('Invalid file metadata');
     }
 
     const fileData = metadata.list[0];
     const downloadLink = await getDownloadLink(metadata, fileData);
-
+    console.log("downloadLink", downloadLink);
     // Update cache
-    cache.set(id, { 
-      expiry: Date.now() + CACHE_TTL, 
+    cache.set(id, {
+      expiry: Date.now() + CACHE_TTL,
       link: downloadLink,
       metadata: fileData
     });
 
-    // Handle JSON response
+    // Return JSON response if requested
     if (format === 'json') {
       return NextResponse.json({
         downloadUrl: downloadLink,
         fileName: fileData.filename,
         fileSize: fileData.size,
-      }, { 
+      }, {
         status: 200,
         headers: {
           'Access-Control-Allow-Origin': '*',
@@ -119,27 +137,71 @@ export async function GET(request: Request): Promise<Response> {
       });
     }
 
-    // Main fix: Removed redirect logic for large files
+    // Get client-supplied range (if any)
     const rangeHeader = request.headers.get('range');
-    
-    // Configure fetch with proper headers
+    console.log("rangeHeader", rangeHeader);
+
+    // Forward only the required headers from the client
+    const forwardHeaders: Record<string, string> = {};
+    for (const header of CLIENT_HEADERS_TO_FORWARD) {
+      const value = request.headers.get(header);
+      if (value) {
+        // Normalize header names as needed
+        if (header.toLowerCase() === 'if-range') {
+          forwardHeaders['If-Range'] = value;
+        } else if (header.toLowerCase() === 'cookie') {
+          forwardHeaders['Cookie'] = value;
+        } else if (header.toLowerCase() === 'range') {
+          forwardHeaders['Range'] = value;
+        } else if (header.toLowerCase() === 'sec-fetch-dest') {
+          forwardHeaders['Sec-Fetch-Dest'] = value;
+        } else if (header.toLowerCase() === 'sec-fetch-mode') {
+          forwardHeaders['Sec-Fetch-Mode'] = value;
+        } else if (header.toLowerCase() === 'sec-fetch-site') {
+          forwardHeaders['Sec-Fetch-Site'] = value;
+        } else if (header.toLowerCase() === 'sec-ch-ua') {
+          forwardHeaders['Sec-CH-UA'] = value;
+        } else if (header.toLowerCase() === 'sec-ch-ua-mobile') {
+          forwardHeaders['Sec-CH-UA-Mobile'] = value;
+        } else if (header.toLowerCase() === 'sec-ch-ua-platform') {
+          forwardHeaders['Sec-CH-UA-Platform'] = value;
+        } else {
+          forwardHeaders[header] = value;
+        }
+      }
+    }
+
+    // If no range provided, do not include the Range header
+    if (!rangeHeader) {
+      console.log("No range header provided. Fetching full file.");
+      delete forwardHeaders['Range'];
+    }
+
+    // Merge the default headers and forwarded client headers
+    const fetchHeaders = {
+      ...DEFAULT_HEADERS,
+      ...forwardHeaders,
+      'X-Requested-With': 'XMLHttpRequest', // Required for some CDNs
+    };
+
     const fetchOptions: RequestInit = {
-      headers: {
-        ...DEFAULT_HEADERS,
-        Cookie: request.headers.get('Cookie') || '',
-        Range: rangeHeader || '',
-      },
+      headers: fetchHeaders,
       redirect: 'follow',
     };
 
-    // Stream the file directly
+    console.log("fetchOptions", fetchOptions);
+
+    // Fetch (stream) the file from the download link
     const fileResponse = await fetch(downloadLink, fetchOptions);
-    
+    console.log("====================================");
+    console.log("fileResponse", fileResponse.body);
+    console.log("====================================");
+
     if (!fileResponse.ok && fileResponse.status !== 206) {
       throw new Error(`Failed to retrieve file: ${fileResponse.status} ${fileResponse.statusText}`);
     }
 
-    // Prepare response headers
+    // Prepare response headers for the client
     const responseHeaders = new Headers({
       'Content-Type': fileResponse.headers.get('Content-Type') || 'application/octet-stream',
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileData.filename)}`,
@@ -153,18 +215,22 @@ export async function GET(request: Request): Promise<Response> {
       'X-File-Md5': fileData.md5,
     });
 
-    // Add content headers
+    // Forward content-specific headers from the upstream response
     fileResponse.headers.forEach((value, key) => {
       if (['content-length', 'content-range'].includes(key.toLowerCase())) {
         responseHeaders.set(key, value);
       }
     });
 
+    console.log("responseHeaders", responseHeaders);
+
+    // Return the streamed file response to the client
     return new Response(fileResponse.body, {
       status: fileResponse.status,
       headers: responseHeaders,
     });
   } catch (error) {
+    console.log("error", error);
     if (error instanceof Error) {
       console.error(`Error processing request: ${error.message}`);
     } else {
@@ -184,7 +250,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 }
 
-// Remaining helper functions unchanged
+// Helper function to get the download link
 async function getDownloadLink(
   metadata: TeraboxMetadata,
   fileData: TeraboxFile
@@ -212,6 +278,7 @@ async function getDownloadLink(
   return response.downloadLink;
 }
 
+// Helper function to fetch with timeout
 async function fetchWithTimeout<T>(
   url: string,
   options: RequestInit = {}
